@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import os
 import tqdm
-
+import random
 from swag import data, losses, models, utils
 from swag.posteriors import SWAG, KFACLaplace
 
@@ -53,7 +53,7 @@ parser.add_argument(
     "--method",
     type=str,
     default="SWAG",
-    choices=["SWAG", "KFACLaplace", "SGD", "HomoNoise", "Dropout", "SWAGDrop"],
+    choices=["cSWAG", "SWAG", "KFACLaplace", "SGD", "HomoNoise", "Dropout", "SWAGDrop"],
     required=True,
 )
 parser.add_argument(
@@ -63,6 +63,8 @@ parser.add_argument(
     required=True,
     help="path to npz results file",
 )
+
+parser.add_argument("--num_cycles", type=int, default=6)
 parser.add_argument("--N", type=int, default=30)
 parser.add_argument("--scale", type=float, default=1.0)
 parser.add_argument(
@@ -115,7 +117,7 @@ loaders, num_classes = data.loaders(
     num_classes = int(num_classes)"""
 
 print("Preparing model")
-if args.method in ["SWAG", "HomoNoise", "SWAGDrop"]:
+if args.method in ["SWAG", "HomoNoise", "SWAGDrop", "cSWAG"]:
     model = SWAG(
         model_cfg.base,
         no_cov_mat=not args.cov_mat,
@@ -124,6 +126,10 @@ if args.method in ["SWAG", "HomoNoise", "SWAGDrop"]:
         num_classes=num_classes,
         **model_cfg.kwargs
     )
+
+
+
+
 elif args.method in ["SGD", "Dropout", "KFACLaplace"]:
     model = model_cfg.base(*model_cfg.args, num_classes=num_classes, **model_cfg.kwargs)
 else:
@@ -135,10 +141,17 @@ def train_dropout(m):
     if type(m) == torch.nn.modules.dropout.Dropout:
         m.train()
 
+if args.method == "cSWAG": 
+    print("Loading cSWAG")
+    state_dcts = []
+    for i in range(args.num_cycles):
+        state_dcts.append(f"{args.file}_cycle-{i}.pt")
+    print(state_dcts)
 
-print("Loading model %s" % args.file)
-checkpoint = torch.load(args.file)
-model.load_state_dict(checkpoint["state_dict"])
+else: 
+    print("Loading model %s" % args.file)
+    checkpoint = torch.load(args.file)
+    model.load_state_dict(checkpoint["state_dict"])
 
 if args.method == "KFACLaplace":
     print(len(loaders["train"].dataset))
@@ -175,6 +188,12 @@ for i in range(args.N):
             loss, _ = losses.cross_entropy(model.net, t_input, t_target)
             loss.backward(create_graph=True)
             model.step(update_params=False)
+    
+
+    if args.method == "cSWAG":
+       cycle_to_use = random.randint(0, 3)
+       checkpoint = torch.load(state_dcts[cycle_to_use])
+       model.load_state_dict(checkpoint["state_dict"])
 
     if args.method not in ["SGD", "Dropout"]:
         sample_with_cov = args.cov_mat and not args.use_diag
@@ -182,13 +201,13 @@ for i in range(args.N):
 
     if "SWAG" in args.method:
         utils.bn_update(loaders["train"], model)
-
+    
     model.eval()
     if args.method in ["Dropout", "SWAGDrop"]:
         model.apply(train_dropout)
         # torch.manual_seed(i)
         # utils.bn_update(loaders['train'], model)
-
+    
     k = 0
     for input, target in tqdm.tqdm(loaders["test"]):
         input = input.cuda(non_blocking=True)

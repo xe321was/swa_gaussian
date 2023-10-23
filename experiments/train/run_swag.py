@@ -15,8 +15,8 @@ parser = argparse.ArgumentParser(description="SGD/SWA training")
 parser.add_argument(
     "--dir",
     type=str,
-    default=None,
-    required=True,
+    default='TEST',
+    required=False,
     help="training directory (default: None)",
 )
 
@@ -26,8 +26,8 @@ parser.add_argument(
 parser.add_argument(
     "--data_path",
     type=str,
-    default=None,
-    required=True,
+    default="swa_gaussian/data",
+    required=False,
     metavar="PATH",
     help="path to datasets location (default: None)",
 )
@@ -55,8 +55,8 @@ parser.add_argument(
 parser.add_argument(
     "--model",
     type=str,
-    default=None,
-    required=True,
+    default="VGG16",
+    required=False,
     metavar="MODEL",
     help="model name (default: None)",
 )
@@ -153,10 +153,15 @@ parser.add_argument(
 )
 parser.add_argument("--no_schedule", action="store_true", help="store schedule")
 
-args = parser.parse_args()
+parser.add_argument("--use_cyc", action="store_true")
 
+parser.add_argument("--num_cycles", type=int, default=4, help="number of cycles for cyclical schedule")
+
+parser.add_argument("--samples_per_cycle", type=int, default=5)
+args = parser.parse_args()
 args.device = None
 
+init_lr = args.lr_init
 use_cuda = torch.cuda.is_available()
 
 if use_cuda:
@@ -202,7 +207,10 @@ if args.cov_mat:
 else:
     args.no_cov_mat = True
 if args.swa:
-    print("SWAG training")
+    if args.use_cyc:
+        print("cSWAG training")
+    else: 
+        print("SWAG training")
     swag_model = SWAG(
         model_cfg.base,
         no_cov_mat=args.no_cov_mat,
@@ -217,8 +225,10 @@ else:
 
 
 def schedule(epoch):
+    print("updating lr")
     t = (epoch) / (args.swa_start if args.swa else args.epochs)
     lr_ratio = args.swa_lr / args.lr_init if args.swa else 0.01
+    
     if t <= 0.5:
         factor = 1.0
     elif t <= 0.9:
@@ -226,6 +236,24 @@ def schedule(epoch):
     else:
         factor = lr_ratio
     return args.lr_init * factor
+
+
+# learning rate scheduler for cyclical stepsizes 
+# TODO: make sure that this works
+# TODO: make sure it gets called on EACH BATCH 
+def schedule_cyclical(epoch, batch_idx):
+    datasize = 50000 # THIS IS ONLY CORRECT FOR CIFAR 
+    num_batch = datasize // args.batch_size 
+    rcounter = epoch * (datasize // args.batch_size) + batch_idx
+    T = args.epochs * num_batch # total number iterations 
+    M = args.num_cycles # number of cycles 
+
+    cos_inner = np.pi * (rcounter % (T // M))
+    cos_inner /= T // M
+    cos_out = np.cos(cos_inner) + 1
+    lr = 0.5*cos_out*init_lr
+    return lr
+
 
 
 # use a slightly modified loss function that allows input of model
@@ -279,18 +307,22 @@ n_ensembled = 0.0
 
 for epoch in range(start_epoch, args.epochs):
     time_ep = time.time()
-
-    if not args.no_schedule:
+    itr_within_cycle = epoch % (args.epochs // args.num_cycles)
+    lr_func = None
+    if not args.no_schedule and not args.use_cyc:
         lr = schedule(epoch)
         utils.adjust_learning_rate(optimizer, lr)
+    if args.use_cyc:
+        lr_func = lambda batch_idx : schedule_cyclical(epoch, batch_idx)
+        lr = lr_func(0)
     else:
         lr = args.lr_init
 
     if (args.swa and (epoch + 1) > args.swa_start) and args.cov_mat:
-        train_res = utils.train_epoch(loaders["train"], model, criterion, optimizer, cuda=use_cuda)
+        train_res = utils.train_epoch(loaders["train"], model, criterion, optimizer, cuda=use_cuda, cyc_update_function = lr_func)
     else:
-        train_res = utils.train_epoch(loaders["train"], model, criterion, optimizer, cuda=use_cuda)
-
+        train_res = utils.train_epoch(loaders["train"], model, criterion, optimizer, cuda=use_cuda, cyc_update_function = lr_func)
+    
     if (
         epoch == 0
         or epoch % args.eval_freq == args.eval_freq - 1
@@ -304,7 +336,8 @@ for epoch in range(start_epoch, args.epochs):
         args.swa
         and (epoch + 1) > args.swa_start
         and (epoch + 1 - args.swa_start) % args.swa_c_epochs == 0
-    ):
+        and not args.use_cyc
+        ):
         # sgd_preds, sgd_targets = utils.predictions(loaders["test"], model)
         sgd_res = utils.predict(loaders["test"], model)
         sgd_preds = sgd_res["predictions"]
@@ -329,7 +362,37 @@ for epoch in range(start_epoch, args.epochs):
             swag_res = utils.eval(loaders["test"], swag_model, criterion)
         else:
             swag_res = {"loss": None, "accuracy": None}
+    if (
+        args.use_cyc
+        ):
+        print("Performing steps for cyclical variant")
+        if (
+            itr_within_cycle == (args.epochs // args.num_cycles) -1 
+            ):
+            cycle_num = epoch // (args.epochs // args.num_cycles)
+            print(f"{cycle_num}")
+            utils.save_checkpoint(
+                args.dir, cycle_num, name=f"c_swag_cycle", state_dict=swag_model.state_dict()
+            )
+            swag_model.wipe_clean()
+            init_lr = args.lr_init
 
+        elif (
+            itr_within_cycle *  (args.epochs // (2 * args.num_cycles))
+            ):
+            swag_model.collect_model(model)
+             
+        if (
+            epoch == 0
+            or epoch % args.eval_freq == args.eval_freq - 1
+            or epoch == args.epochs - 1
+        ):
+
+            # TODO: making the ensemble prediction for the cyclical variant  
+            pass
+        pass 
+
+        
     if (epoch + 1) % args.save_freq == 0:
         utils.save_checkpoint(
             args.dir,

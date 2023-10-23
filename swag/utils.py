@@ -55,16 +55,16 @@ def train_epoch(
     regression=False,
     verbose=False,
     subset=None,
-):
+    cyc_update_function=None):
+    
     loss_sum = 0.0
     correct = 0.0
     verb_stage = 0
-
     num_objects_current = 0
     num_batches = len(loader)
 
     model.train()
-
+    
     if subset is not None:
         num_batches = int(num_batches * subset)
         loader = itertools.islice(loader, num_batches)
@@ -73,16 +73,18 @@ def train_epoch(
         loader = tqdm.tqdm(loader, total=num_batches)
 
     for i, (input, target) in enumerate(loader):
+        if cyc_update_function: 
+            lr = cyc_update_function(i)
+            adjust_learning_rate(optimizer, lr)
         if cuda:
             input = input.cuda(non_blocking=True)
             target = target.cuda(non_blocking=True)
 
         loss, output = criterion(model, input, target)
-
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 10)
         optimizer.step()
-
         loss_sum += loss.data.item() * input.size(0)
 
         if not regression:

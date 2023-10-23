@@ -19,6 +19,7 @@ def swag_parameters(module, params, no_cov_mat=True):
     for name in list(module._parameters.keys()):
         if module._parameters[name] is None:
             continue
+        
         data = module._parameters[name].data
         module._parameters.pop(name)
         module.register_buffer("%s_mean" % name, data.new(data.size()).zero_())
@@ -28,7 +29,6 @@ def swag_parameters(module, params, no_cov_mat=True):
             module.register_buffer(
                 "%s_cov_mat_sqrt" % name, data.new_empty((0, data.numel())).zero_()
             )
-
         params.append((module, name))
 
 
@@ -43,15 +43,28 @@ class SWAG(torch.nn.Module):
 
         self.no_cov_mat = no_cov_mat
         self.max_num_models = max_num_models
-
+        print(f"no cov mat = {no_cov_mat}")
         self.var_clamp = var_clamp
-
+        print(max_num_models)
         self.base = base(*args, **kwargs)
         self.base.apply(
             lambda module: swag_parameters(
                 module=module, params=self.params, no_cov_mat=self.no_cov_mat
             )
         )
+
+# TODO: I think this works? 
+# at the begining of the next cycle, need to wipe the mean and cov clean 
+# do that by calling swap parameters and making a new parameter list, and then just replacing  it 
+    def wipe_clean(self): 
+        
+        self.base.apply(
+            lambda module: swag_parameters(
+                module=module, params=self.params, no_cov_mat=self.no_cov_mat
+            )
+        )
+
+
 
     def forward(self, *args, **kwargs):
         return self.base(*args, **kwargs)
