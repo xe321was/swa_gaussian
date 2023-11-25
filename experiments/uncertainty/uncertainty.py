@@ -7,6 +7,8 @@ import tqdm
 import random
 from swag import data, losses, models, utils
 from swag.posteriors import SWAG, KFACLaplace
+import itertools
+
 
 parser = argparse.ArgumentParser(description="SGD/SWA training")
 parser.add_argument("--file", type=str, default=None, required=True, help="checkpoint")
@@ -53,7 +55,16 @@ parser.add_argument(
     "--method",
     type=str,
     default="SWAG",
-    choices=["cSWAG", "SWAG", "KFACLaplace", "SGD", "HomoNoise", "Dropout", "SWAGDrop"],
+    choices=[
+        "csgmcmc",
+        "cSWAG",
+        "SWAG",
+        "KFACLaplace",
+        "SGD",
+        "HomoNoise",
+        "Dropout",
+        "SWAGDrop",
+    ],
     required=True,
 )
 parser.add_argument(
@@ -63,7 +74,7 @@ parser.add_argument(
     required=True,
     help="path to npz results file",
 )
-
+parser.add_argument("--samples_per_cycle", type=int, default=3)
 parser.add_argument("--num_cycles", type=int, default=6)
 parser.add_argument("--N", type=int, default=30)
 parser.add_argument("--scale", type=float, default=1.0)
@@ -124,13 +135,11 @@ if args.method in ["SWAG", "HomoNoise", "SWAGDrop", "cSWAG"]:
         max_num_models=20,
         *model_cfg.args,
         num_classes=num_classes,
-        **model_cfg.kwargs
+        **model_cfg.kwargs,
     )
 
 
-
-
-elif args.method in ["SGD", "Dropout", "KFACLaplace"]:
+elif args.method in ["SGD", "Dropout", "KFACLaplace", "csgmcmc"]:
     model = model_cfg.base(*model_cfg.args, num_classes=num_classes, **model_cfg.kwargs)
 else:
     assert False
@@ -141,14 +150,24 @@ def train_dropout(m):
     if type(m) == torch.nn.modules.dropout.Dropout:
         m.train()
 
-if args.method == "cSWAG": 
+
+if args.method == "cSWAG":
     print("Loading cSWAG")
     state_dcts = []
     for i in range(args.num_cycles):
         state_dcts.append(f"{args.file}_cycle-{i}.pt")
     print(state_dcts)
 
-else: 
+elif args.method == "csgmcmc":
+    print("Loading csgmcmc")
+    state_dcts = []
+    for i in range(args.num_cycles):
+        tmp = []
+        for j in range(args.samples_per_cycle):
+            tmp.append(f"{args.file}_cycle_{i}-{j+1}.pt")
+        state_dcts.append(tmp)
+    print(state_dcts)
+else:
     print("Loading model %s" % args.file)
     checkpoint = torch.load(args.file)
     model.load_state_dict(checkpoint["state_dict"])
@@ -169,12 +188,17 @@ if args.method == "HomoNoise":
     std = 0.01
     for module, name in model.params:
         mean = module.__getattr__("%s_mean" % name)
-        module.__getattr__("%s_sq_mean" % name).copy_(mean ** 2 + std ** 2)
+        module.__getattr__("%s_sq_mean" % name).copy_(mean**2 + std**2)
 
 
 predictions = np.zeros((len(loaders["test"].dataset), num_classes))
 targets = np.zeros(len(loaders["test"].dataset))
 print(targets.size)
+csgmcmc_sample_cycle_pairs = list(
+    itertools.product(
+        [i for i in range(args.num_cycles)], [i for i in range(args.samples_per_cycle)]
+    )
+)
 
 for i in range(args.N):
     print("%d/%d" % (i + 1, args.N))
@@ -188,26 +212,33 @@ for i in range(args.N):
             loss, _ = losses.cross_entropy(model.net, t_input, t_target)
             loss.backward(create_graph=True)
             model.step(update_params=False)
-    
 
     if args.method == "cSWAG":
-       cycle_to_use = random.randint(0, 3)
-       checkpoint = torch.load(state_dcts[cycle_to_use])
-       model.load_state_dict(checkpoint["state_dict"])
+        cycle_to_use = i % args.num_cycles
+        checkpoint = torch.load(state_dcts[cycle_to_use])
+        model.load_state_dict(checkpoint["state_dict"])
+        print(f"cycle = {cycle_to_use}")
+    if args.method == "csgmcmc":
+        pair = csgmcmc_sample_cycle_pairs[i % len(csgmcmc_sample_cycle_pairs)]
+        cycle_to_use = pair[0]
+        checkpoint_to_use = pair[1]
+        print(f"cycle, checkpoint = {cycle_to_use, checkpoint_to_use}")
+        checkpoint = torch.load(state_dcts[cycle_to_use][checkpoint_to_use])
+        model.load_state_dict(checkpoint["state_dict"])
 
-    if args.method not in ["SGD", "Dropout"]:
+    if args.method not in ["SGD", "Dropout", "csgmcmc"]:
         sample_with_cov = args.cov_mat and not args.use_diag
         model.sample(scale=args.scale, cov=sample_with_cov)
 
     if "SWAG" in args.method:
         utils.bn_update(loaders["train"], model)
-    
+
     model.eval()
     if args.method in ["Dropout", "SWAGDrop"]:
         model.apply(train_dropout)
         # torch.manual_seed(i)
         # utils.bn_update(loaders['train'], model)
-    
+
     k = 0
     for input, target in tqdm.tqdm(loaders["test"]):
         input = input.cuda(non_blocking=True)
@@ -229,7 +260,7 @@ for i in range(args.N):
         k += input.size()[0]
 
     print("Accuracy:", np.mean(np.argmax(predictions, axis=1) == targets))
-    #nll is sum over entire dataset
+    # nll is sum over entire dataset
     print("NLL:", nll(predictions / (i + 1), targets))
 predictions /= args.N
 

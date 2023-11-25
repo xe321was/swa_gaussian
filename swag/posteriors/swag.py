@@ -57,13 +57,16 @@ class SWAG(torch.nn.Module):
 # at the begining of the next cycle, need to wipe the mean and cov clean 
 # do that by calling swap parameters and making a new parameter list, and then just replacing  it 
     def wipe_clean(self): 
-        
-        self.base.apply(
-            lambda module: swag_parameters(
-                module=module, params=self.params, no_cov_mat=self.no_cov_mat
-            )
-        )
-
+        self.register_buffer("n_models", torch.zeros([1], dtype=torch.long))
+        for module, name in self.params: 
+            mean = module.__getattr__("%s_mean" % name) 
+            module.register_buffer("%s_mean" % name, mean.new(mean.size()).zero_())
+            module.register_buffer("%s_sq_mean" % name, mean.new(mean.size()).zero_())
+            if not self.no_cov_mat: 
+                module.register_buffer(
+                    "%s_cov_mat_sqrt" % name, mean.new_empty((0, mean.numel())).zero_()
+                )
+        return 
 
 
     def forward(self, *args, **kwargs):
@@ -158,20 +161,26 @@ class SWAG(torch.nn.Module):
         for (module, name), sample in zip(self.params, samples_list):
             module.__setattr__(name, sample.cuda())
 
-    def collect_model(self, base_model):
+    def collect_model(self, base_model, weight=None):
         for (module, name), base_param in zip(self.params, base_model.parameters()):
             mean = module.__getattr__("%s_mean" % name)
             sq_mean = module.__getattr__("%s_sq_mean" % name)
 
-            # first moment
-            mean = mean * self.n_models.item() / (
-                self.n_models.item() + 1.0
-            ) + base_param.data / (self.n_models.item() + 1.0)
+            # first momenti
+            if weight:
+                mean = mean + weight * base_param.data
 
-            # second moment
-            sq_mean = sq_mean * self.n_models.item() / (
-                self.n_models.item() + 1.0
-            ) + base_param.data ** 2 / (self.n_models.item() + 1.0)
+                # second moment
+                sq_mean = sq_mean + weight * base_param.data ** 2 
+            else:
+                mean = mean * self.n_models.item() / (
+                    self.n_models.item() + 1.0
+                ) + base_param.data / (self.n_models.item() + 1.0)
+
+                # second moment
+                sq_mean = sq_mean * self.n_models.item() / (
+                    self.n_models.item() + 1.0
+                ) + base_param.data ** 2 / (self.n_models.item() + 1.0)
 
             # square root of covariance matrix
             if self.no_cov_mat is False:

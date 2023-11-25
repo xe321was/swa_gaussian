@@ -46,6 +46,24 @@ def save_checkpoint(dir, epoch, name="checkpoint", **kwargs):
     torch.save(state, filepath)
 
 
+def noise_loss(model, lr,alpha):
+    noise_loss = 0.0
+    noise_std = (2/lr*alpha)**0.5
+    for var in model.parameters():
+        means = torch.zeros(var.size()).to(var.device)
+        noise_loss += torch.sum(var * torch.normal(means, std = noise_std).to(var.device))
+    return noise_loss
+
+
+def dispersive_loss(model, saved_means): 
+    disp_loss = 0.0
+    for mean in saved_means: 
+        for name, param in model.named_parameters():
+            prev_mean = getattr(var, '%s_mean' % name)
+            disp_loss += torch.norm(prev_mean - param)
+    return disp_loss
+
+# is_mcmc = do we use the noise term or not? 
 def train_epoch(
     loader,
     model,
@@ -55,7 +73,10 @@ def train_epoch(
     regression=False,
     verbose=False,
     subset=None,
-    cyc_update_function=None):
+    cyc_update_function=None,
+    use_noise=False,
+    use_sam = False,
+    epoch=None):
     
     loss_sum = 0.0
     correct = 0.0
@@ -73,6 +94,7 @@ def train_epoch(
         loader = tqdm.tqdm(loader, total=num_batches)
 
     for i, (input, target) in enumerate(loader):
+        optimizer.zero_grad()
         if cyc_update_function: 
             lr = cyc_update_function(i)
             adjust_learning_rate(optimizer, lr)
@@ -80,9 +102,22 @@ def train_epoch(
             input = input.cuda(non_blocking=True)
             target = target.cuda(non_blocking=True)
 
+      #if use_sam: 
+      #    loss, output = criterion(model, input, target)
+      #    loss.backward() 
+      #    torch.nn.utils.clip_grad_norm_(model.parameters(), 10)
+      #    optimizer.first_step(zero_grad=True)
+      #    loss, output = criterion(model, input, target)
+      #    loss.backward()
+      #    torch.nn.utils.clip_grad_norm_(model.parameters(), 10)
+      #    optimizer.second_step(zero_grad=True) 
+      # else:
+
         loss, output = criterion(model, input, target)
-        optimizer.zero_grad()
+        if use_noise: 
+            loss += noise_loss(model, lr, 1)
         loss.backward()
+        # is this grad clip even needed? 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10)
         optimizer.step()
         loss_sum += loss.data.item() * input.size(0)
