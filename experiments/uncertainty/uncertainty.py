@@ -6,7 +6,7 @@ import os
 import tqdm
 import random
 from swag import data, losses, models, utils
-from swag.posteriors import SWAG, KFACLaplace
+from swag.posteriors import SWAG, KFACLaplace, cSGMCMC
 import itertools
 
 
@@ -167,6 +167,9 @@ elif args.method == "csgmcmc":
             tmp.append(f"{args.file}_cycle_{i}-{j+1}.pt")
         state_dcts.append(tmp)
     print(state_dcts)
+    c_sgmcmc = cSGMCMC(state_dcts, model, args.num_cycles, args.samples_per_cycle)
+    args.N = args.N // (args.num_cycles * args.samples_per_cycle)
+    model = c_sgmcmc  # make it a fair comparison
 else:
     print("Loading model %s" % args.file)
     checkpoint = torch.load(args.file)
@@ -194,11 +197,6 @@ if args.method == "HomoNoise":
 predictions = np.zeros((len(loaders["test"].dataset), num_classes))
 targets = np.zeros(len(loaders["test"].dataset))
 print(targets.size)
-csgmcmc_sample_cycle_pairs = list(
-    itertools.product(
-        [i for i in range(args.num_cycles)], [i for i in range(args.samples_per_cycle)]
-    )
-)
 
 for i in range(args.N):
     print("%d/%d" % (i + 1, args.N))
@@ -218,13 +216,6 @@ for i in range(args.N):
         checkpoint = torch.load(state_dcts[cycle_to_use])
         model.load_state_dict(checkpoint["state_dict"])
         print(f"cycle = {cycle_to_use}")
-    if args.method == "csgmcmc":
-        pair = csgmcmc_sample_cycle_pairs[i % len(csgmcmc_sample_cycle_pairs)]
-        cycle_to_use = pair[0]
-        checkpoint_to_use = pair[1]
-        print(f"cycle, checkpoint = {cycle_to_use, checkpoint_to_use}")
-        checkpoint = torch.load(state_dcts[cycle_to_use][checkpoint_to_use])
-        model.load_state_dict(checkpoint["state_dict"])
 
     if args.method not in ["SGD", "Dropout", "csgmcmc"]:
         sample_with_cov = args.cov_mat and not args.use_diag
