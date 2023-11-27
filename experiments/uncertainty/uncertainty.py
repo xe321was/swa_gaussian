@@ -6,7 +6,7 @@ import os
 import tqdm
 import random
 from swag import data, losses, models, utils
-from swag.posteriors import SWAG, KFACLaplace
+from swag.posteriors import SWAG, KFACLaplace, cSGMCMC, cSWAG
 import itertools
 
 
@@ -98,6 +98,7 @@ def nll(outputs, labels):
 
 args = parser.parse_args()
 
+sample_with_cov = args.cov_mat and not args.use_diag
 eps = 1e-12
 if args.cov_mat:
     args.cov_mat = True
@@ -129,14 +130,36 @@ loaders, num_classes = data.loaders(
 
 print("Preparing model")
 if args.method in ["SWAG", "HomoNoise", "SWAGDrop", "cSWAG"]:
-    model = SWAG(
-        model_cfg.base,
-        no_cov_mat=not args.cov_mat,
-        max_num_models=20,
-        *model_cfg.args,
-        num_classes=num_classes,
-        **model_cfg.kwargs,
-    )
+    if args.method == "cSWAG":
+        print("Loading cSWAG")
+        mode_models = []
+        for i in range(args.num_cycles):
+            model = SWAG(
+                model_cfg.base,
+                no_cov_mat=not args.cov_mat,
+                max_num_models=20,
+                *model_cfg.args,
+                num_classes=num_classes,
+                **model_cfg.kwargs,
+            )
+            sd = torch.load(f"{args.file}_cycle-{i}.pt")
+            model.load_state_dict(sd["state_dict"])
+            mode_models.append(model)
+        model = cSWAG(
+            mode_models,
+            cov=sample_with_cov,
+            scale=args.scale,
+            bn_update_fn=lambda m: utils.bn_update(loaders["train"], m),
+        )
+    else:
+        model = SWAG(
+            model_cfg.base,
+            no_cov_mat=not args.cov_mat,
+            max_num_models=20,
+            *model_cfg.args,
+            num_classes=num_classes,
+            **model_cfg.kwargs,
+        )
 
 
 elif args.method in ["SGD", "Dropout", "KFACLaplace", "csgmcmc"]:
@@ -151,14 +174,7 @@ def train_dropout(m):
         m.train()
 
 
-if args.method == "cSWAG":
-    print("Loading cSWAG")
-    state_dcts = []
-    for i in range(args.num_cycles):
-        state_dcts.append(f"{args.file}_cycle-{i}.pt")
-    print(state_dcts)
-
-elif args.method == "csgmcmc":
+if args.method == "csgmcmc":
     print("Loading csgmcmc")
     state_dcts = []
     for i in range(args.num_cycles):
@@ -167,6 +183,11 @@ elif args.method == "csgmcmc":
             tmp.append(f"{args.file}_cycle_{i}-{j+1}.pt")
         state_dcts.append(tmp)
     print(state_dcts)
+    c_sgmcmc = cSGMCMC(state_dcts, model, args.num_cycles, args.samples_per_cycle)
+    args.N = 1
+    model = c_sgmcmc  # make it a fair comparison
+elif args.method == "cSWAG":
+    pass
 else:
     print("Loading model %s" % args.file)
     checkpoint = torch.load(args.file)
@@ -213,24 +234,13 @@ for i in range(args.N):
             loss.backward(create_graph=True)
             model.step(update_params=False)
 
-    if args.method == "cSWAG":
-        cycle_to_use = i % args.num_cycles
-        checkpoint = torch.load(state_dcts[cycle_to_use])
-        model.load_state_dict(checkpoint["state_dict"])
-        print(f"cycle = {cycle_to_use}")
-    if args.method == "csgmcmc":
-        pair = csgmcmc_sample_cycle_pairs[i % len(csgmcmc_sample_cycle_pairs)]
-        cycle_to_use = pair[0]
-        checkpoint_to_use = pair[1]
-        print(f"cycle, checkpoint = {cycle_to_use, checkpoint_to_use}")
-        checkpoint = torch.load(state_dcts[cycle_to_use][checkpoint_to_use])
-        model.load_state_dict(checkpoint["state_dict"])
-
-    if args.method not in ["SGD", "Dropout", "csgmcmc"]:
-        sample_with_cov = args.cov_mat and not args.use_diag
+    if args.method not in ["SGD", "Dropout", "csgmcmc", "cSWAG"]:
         model.sample(scale=args.scale, cov=sample_with_cov)
 
-    if "SWAG" in args.method:
+    if args.method == "cSWAG":
+        model.update_models()
+
+    if args.method == "SWAG":
         utils.bn_update(loaders["train"], model)
 
     model.eval()
