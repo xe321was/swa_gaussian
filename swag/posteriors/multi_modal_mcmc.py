@@ -8,33 +8,22 @@ import torch
 class cSGMCMC(nn.Module):
     def __init__(
         self,
-        state_dicts,
-        base_model,
-        num_modes,
-        samples_per_mode,
+        mode_models,
     ) -> None:
         super().__init__()
-        self.state_dicts = state_dicts
-        self.base_model = base_model
-        self.num_modes = num_modes
-        self.samples_per_mode = samples_per_mode
-
-    def _load_sample(self, mode, sample_num):
-        sd = self.state_dicts[mode][sample_num]
-        checkpoint = torch.load(sd)
-        self.base_model.load_state_dict(checkpoint["state_dict"])
+        self.mode_models = mode_models
+        self.num_modes = len(mode_models)
+        self.samples_per_mode = len(mode_models[0])
 
     def forward(self, x):
-        self._load_sample(0, 0)
-        counter = 0
-        tmp = self.base_model(x)
-        out = torch.zeros_like(tmp).to(tmp.device)
+        output_list = []
         for i in range(self.num_modes):
             for j in range(self.samples_per_mode):
-                self._load_sample(i, j)
-                out += self.base_model(x)
-                counter += 1
-        return out / counter
+                model = self.mode_models[i][j].cuda()
+                model.cuda()
+                model.eval()
+                output_list.append(model(x))
+        return sum(output_list) / len(output_list)
 
 
 # TODO: how to make this so that adversarial attacker can use information from all the modes when attacking?

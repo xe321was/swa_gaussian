@@ -8,6 +8,7 @@ import random
 from swag import data, losses, models, utils
 from swag.posteriors import SWAG, KFACLaplace, cSGMCMC, cSWAG
 import itertools
+from torchattacks import PGD, PGDL2
 
 
 parser = argparse.ArgumentParser(description="SGD/SWA training")
@@ -86,6 +87,10 @@ parser.add_argument("--use_diag", action="store_true", help="use diag cov for sw
 parser.add_argument(
     "--seed", type=int, default=1, metavar="S", help="random seed (default: 1)"
 )
+parser.add_argument("--adv", action="store_true", help="evaluate adversarial metrics")
+parser.add_argument("--adv_mode", type=str, default="l2", help="l2 or linf")
+parser.add_argument("--adv_norm", type=float, default=0.5)
+parser.add_argument("--adv_steps", type=int, default=10)
 
 
 def nll(outputs, labels):
@@ -176,16 +181,22 @@ def train_dropout(m):
 
 if args.method == "csgmcmc":
     print("Loading csgmcmc")
-    state_dcts = []
+    mode_models = []
     for i in range(args.num_cycles):
         tmp = []
         for j in range(args.samples_per_cycle):
-            tmp.append(f"{args.file}_cycle_{i}-{j+1}.pt")
-        state_dcts.append(tmp)
-    print(state_dcts)
-    c_sgmcmc = cSGMCMC(state_dcts, model, args.num_cycles, args.samples_per_cycle)
+            model_sd = f"{args.file}_cycle_{i}-{j+1}.pt"
+            base_model = model_cfg.base(
+                *model_cfg.args, num_classes=num_classes, **model_cfg.kwargs
+            )
+            checkpoint = torch.load(model_sd)
+            base_model.load_state_dict(checkpoint["state_dict"])
+            tmp.append(base_model)
+        mode_models.append(tmp)
+    print(mode_models)
+    c_sgmcmc = cSGMCMC(mode_models)
     args.N = 1
-    model = c_sgmcmc  # make it a fair comparison
+    model = c_sgmcmc.cuda()  # make it a fair comparison
 elif args.method == "cSWAG":
     pass
 else:
@@ -252,21 +263,35 @@ for i in range(args.N):
     k = 0
     for input, target in tqdm.tqdm(loaders["test"]):
         input = input.cuda(non_blocking=True)
+        target = target.cuda(non_blocking=True)
         ##TODO: is this needed?
         # if args.method == 'Dropout':
         #    model.apply(train_dropout)
         torch.manual_seed(i)
-
-        if args.method == "KFACLaplace":
-            output = model.net(input)
+        if args.adv:
+            if args.adv_mode == "linf":
+                attacker = PGD(model, eps=args.adv_norm, steps=args.adv_steps)
+            else:
+                attacker = PGDL2(
+                    model,
+                    eps=args.adv_norm,
+                    alpha=(2 * args.adv_norm) / 2,
+                    steps=args.adv_steps,
+                )
+            print(model)
+            eval_input = attacker(input, target)
         else:
-            output = model(input)
+            eval_input = input
+        if args.method == "KFACLaplace":
+            output = model.net(eval_input)
+        else:
+            output = model(eval_input)
 
         with torch.no_grad():
             predictions[k : k + input.size()[0]] += (
                 F.softmax(output, dim=1).cpu().numpy()
             )
-        targets[k : (k + target.size(0))] = target.numpy()
+        targets[k : (k + target.size(0))] = target.cpu().numpy()
         k += input.size()[0]
 
     print("Accuracy:", np.mean(np.argmax(predictions, axis=1) == targets))

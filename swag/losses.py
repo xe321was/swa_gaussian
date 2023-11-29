@@ -54,7 +54,7 @@ def adversarial_cross_entropy(
     adv_loss = lossfn(outputs_perturbed, target)
 
     # return mean of loss for reasonable scalings
-    return (loss + adv_loss) / 2.0, output
+    return (loss + adv_loss) / 1.0, output
 
 
 def masked_loss(y_pred, y_true, void_class=11.0, weight=None, reduce=True):
