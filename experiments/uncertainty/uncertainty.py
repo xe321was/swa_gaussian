@@ -232,6 +232,27 @@ csgmcmc_sample_cycle_pairs = list(
     )
 )
 
+if args.adv and "SWAG" in args.method:
+    print("Precomputing adv attacks SWAG methods")
+    adv_trainloader = []
+    model.update_models()
+    for input, target in tqdm.tqdm(loaders["test"]):
+        input = input.cuda()
+        target = target.cuda()
+        if args.adv_mode == "linf":
+            attacker = PGD(model, eps=args.adv_norm, steps=args.adv_steps)
+        else:
+            attacker = PGDL2(
+                model,
+                eps=args.adv_norm,
+                alpha=(2 * args.adv_norm) / 2,
+                steps=args.adv_steps,
+            )
+        eval_input = attacker(input, target)
+        input = input.cpu()
+        eval_input = eval_input.cpu()
+        target = target.cpu()
+        adv_trainloader.append((eval_input, target))
 for i in range(args.N):
     print("%d/%d" % (i + 1, args.N))
     if args.method == "KFACLaplace":
@@ -253,7 +274,6 @@ for i in range(args.N):
 
     if args.method == "SWAG":
         utils.bn_update(loaders["train"], model)
-
     model.eval()
     if args.method in ["Dropout", "SWAGDrop"]:
         model.apply(train_dropout)
@@ -261,14 +281,18 @@ for i in range(args.N):
         # utils.bn_update(loaders['train'], model)
 
     k = 0
-    for input, target in tqdm.tqdm(loaders["test"]):
+    if args.adv and "SWAG" in args.method:
+        pg = tqdm.tqdm(adv_trainloader)
+    else:
+        pg = tqdm.tqdm(loaders["test"])
+    for input, target in pg:
         input = input.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
         ##TODO: is this needed?
         # if args.method == 'Dropout':
         #    model.apply(train_dropout)
         torch.manual_seed(i)
-        if args.adv:
+        if args.adv and "SWAG" not in args.method:
             if args.adv_mode == "linf":
                 attacker = PGD(model, eps=args.adv_norm, steps=args.adv_steps)
             else:
