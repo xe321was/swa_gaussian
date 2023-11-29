@@ -40,6 +40,7 @@ class cSWAG(nn.Module):
 
     def update_models(self):
         for model in self.mode_models:
+            model.train()
             model.cuda()
             model.sample(scale=self.scale, cov=self.cov)
             self.bn_update_fn(model)

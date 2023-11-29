@@ -235,7 +235,11 @@ csgmcmc_sample_cycle_pairs = list(
 if args.adv and "SWAG" in args.method:
     print("Precomputing adv attacks SWAG methods")
     adv_trainloader = []
-    model.update_models()
+    if args.method == "cSWAG":
+        model.update_models()
+    else:
+        model.sample(scale=args.scale, cov=sample_with_cov)
+        utils.bn_update(loaders["train"], model)
     for input, target in tqdm.tqdm(loaders["test"]):
         input = input.cuda()
         target = target.cuda()
@@ -253,6 +257,8 @@ if args.adv and "SWAG" in args.method:
         eval_input = eval_input.cpu()
         target = target.cpu()
         adv_trainloader.append((eval_input, target))
+
+
 for i in range(args.N):
     print("%d/%d" % (i + 1, args.N))
     if args.method == "KFACLaplace":
@@ -291,7 +297,7 @@ for i in range(args.N):
         ##TODO: is this needed?
         # if args.method == 'Dropout':
         #    model.apply(train_dropout)
-        torch.manual_seed(i)
+        # torch.manual_seed(i)
         if args.adv and "SWAG" not in args.method:
             if args.adv_mode == "linf":
                 attacker = PGD(model, eps=args.adv_norm, steps=args.adv_steps)
@@ -306,12 +312,12 @@ for i in range(args.N):
             eval_input = attacker(input, target)
         else:
             eval_input = input
-        if args.method == "KFACLaplace":
-            output = model.net(eval_input)
-        else:
-            output = model(eval_input)
-
         with torch.no_grad():
+            if args.method == "KFACLaplace":
+                output = model.net(eval_input)
+            else:
+                output = model(eval_input)
+
             predictions[k : k + input.size()[0]] += (
                 F.softmax(output, dim=1).cpu().numpy()
             )
